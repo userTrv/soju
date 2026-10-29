@@ -9,12 +9,11 @@
 # Нужны: Xcode Command Line Tools, Rosetta 2, bison >= 3 (brew install bison).
 set -euo pipefail
 
-ROOT="$(cd "$(dirname "$0")/.." && pwd)"
+# shellcheck source=lib.sh
+source "$(dirname "$0")/lib.sh"
+ROOT="$SOJU_ROOT"
 OUT="${1:-$ROOT/dist/soju-engine}"
-W="${SOJU_WORK:-$HOME/Library/Caches/soju}"
 JOBS="${JOBS:-$(sysctl -n hw.ncpu)}"
-# shellcheck source=../sources.lock
-source "$ROOT/sources.lock"
 
 # Хост движка — x86_64 под Rosetta. Компилятор при этом работает нативно:
 # --host=x86_64-apple-darwin, а тестовые программы configure запускает Rosetta,
@@ -27,25 +26,10 @@ export SDKROOT="${SDKROOT:-$(xcrun --show-sdk-path)}"
 CC_X64="$(xcrun -f clang) -arch x86_64"
 CXX_X64="$(xcrun -f clang++) -arch x86_64"
 
-say() { printf '\033[1m==> %s\033[0m\n' "$*"; }
-die() { printf 'ошибка: %s\n' "$*" >&2; exit 1; }
-
 arch -x86_64 /usr/bin/true 2>/dev/null || die "нужна Rosetta 2: softwareupdate --install-rosetta"
 BISON="$(brew --prefix bison 2>/dev/null)/bin/bison"
 [[ -x "$BISON" ]] || BISON="$(command -v bison)"
 "$BISON" --version | head -1 | grep -qE ' 3\.' || die "нужен bison 3.x: brew install bison"
-
-# fetch URL SHA256 FILE — скачать и сверить хеш; уже скачанный файл тоже сверяется.
-fetch() {
-  local url="$1" sha="$2" file="$3"
-  if [[ ! -f "$file" ]]; then
-    say "скачиваю $(basename "$file")"
-    mkdir -p "$(dirname "$file")"
-    curl -fsSL --retry 3 -A 'Mozilla/5.0' -o "$file.part" "$url"
-    mv "$file.part" "$file"
-  fi
-  echo "$sha  $file" | shasum -a 256 -c --status || { rm -f "$file"; die "sha256 не совпал: $file"; }
-}
 
 # Отпечаток патчей: записывается в SOJU, по нему видно, из чего собран движок.
 patches_id() {
@@ -55,14 +39,7 @@ patches_id() {
 mkdir -p "$W"/{dl,src,obj,tools,deps}
 
 # --- инструменты ---
-MINGW="$W/tools/llvm-mingw-$LLVM_MINGW_VERSION"
-if [[ ! -x "$MINGW/bin/x86_64-w64-mingw32-clang" ]]; then
-  fetch "$LLVM_MINGW_URL" "$LLVM_MINGW_SHA256" "$W/dl/$(basename "$LLVM_MINGW_URL")"
-  say "распаковываю llvm-mingw"
-  rm -rf "$MINGW" "$MINGW.tmp" && mkdir -p "$MINGW.tmp"
-  tar xJf "$W/dl/$(basename "$LLVM_MINGW_URL")" -C "$MINGW.tmp" --strip-components 1
-  mv "$MINGW.tmp" "$MINGW"
-fi
+MINGW="$(ensure_mingw)"
 
 # --- исходники ---
 CX_TAR="$W/dl/$(basename "$CROSSOVER_URL")"
@@ -89,7 +66,7 @@ fi
 # --- freetype (шрифты; без него игры остаются без текста) ---
 DEPS="$W/deps/x86_64"
 if [[ ! -f "$DEPS/lib/libfreetype.6.dylib" ]]; then
-  FT_TAR="$W/dl/$(basename "$FREETYPE_URL")"
+  FT_TAR="$W/dl/freetype-$FREETYPE_VERSION.tar.xz"
   fetch "$FREETYPE_URL" "$FREETYPE_SHA256" "$FT_TAR"
   say "собираю freetype $FREETYPE_VERSION"
   rm -rf "$W/obj/freetype" && mkdir -p "$W/obj/freetype"

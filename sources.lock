@@ -12,8 +12,9 @@ LLVM_MINGW_URL=https://github.com/mstorsjo/llvm-mingw/releases/download/20261020
 LLVM_MINGW_SHA256=e9c13e4ede38e715003ffc674d4d00a1088df8235439d1f0c16188ff0704c17e
 
 # freetype той же версии, что в CrossOver, но релизным архивом: в нём есть готовый configure.
+# Зеркала через пробел: SourceForge отвечает раннерам GitHub 403.
 FREETYPE_VERSION=2.13.3
-FREETYPE_URL=https://downloads.sourceforge.net/project/freetype/freetype2/2.13.3/freetype-2.13.3.tar.xz
+FREETYPE_URL="https://download.savannah.nongnu.org/releases/freetype/freetype-2.13.3.tar.xz https://downloads.sourceforge.net/project/freetype/freetype2/2.13.3/freetype-2.13.3.tar.xz"
 FREETYPE_SHA256=0550350666d427c74daeb85d5ac7bb353acba5f76956395995311a9c6f063289
 
 # Wine Mono (.NET) и Wine Gecko (mshtml) — версии и sha256 из dlls/appwiz.cpl/addons.c этого Wine.

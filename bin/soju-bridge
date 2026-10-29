@@ -1,0 +1,161 @@
+#!/bin/bash
+# soju-bridge — мост Steamworks: Windows-игра под Wine говорит со Steam для Mac.
+#
+#   soju-bridge build DLL|SDK [КАТАЛОГ]   собрать мост под steam_api64.dll игры (или эталонный DLL SDK 1.64 и т. п.)
+#   soju-bridge exec МОСТ APPID КОМАНДА…  запустить хелпер и в его окружении команду (обычно wine с игрой)
+#   soju-bridge test DLL|SDK              сверить мост с нативным Steam на Spacewar (480), нужен движок soju
+#   soju-bridge test-build DLL|SDK        только собрать тесты (Mac и Windows, C и C++) — для CI без Steam
+#   soju-bridge sdk-dll SDK               скачать эталонный steam_api64.dll SDK и напечатать путь
+#   soju-bridge sdks                      версии SDK в каталоге
+#
+# Мост собирается в КАТАЛОГ, по умолчанию $SOJU_WORK/bridge/<sha256 DLL>: steam_api64.dll (кладётся
+# вместо оригинального в игру), soju-steamd и libsteam_api.dylib того же SDK. Лог хелпера —
+# $SOJU_BRIDGE_LOG, по умолчанию $SOJU_WORK/bridge-<appid>.log.
+set -euo pipefail
+# shellcheck source=../scripts/lib.sh
+source "$(cd "$(dirname "$0")/.." && pwd)/scripts/lib.sh"
+
+SDKS="$SOJU_ROOT/bridge/sdk"
+GH_RAW='Accept: application/vnd.github.raw'
+# Файлы Steamworks.NET — через API GitHub: raw.githubusercontent.com у части провайдеров недоступен.
+swnet_url() { echo "https://api.github.com/repos/rlabrecque/Steamworks.NET/contents/com.rlabrecque.steamworks.net/Plugins/$1?ref=$2"; }
+
+sdk_field() { sed -n "s/^$2=//p" "$SDKS/$1/source"; }
+
+# Эталонный steam_api64.dll SDK — проверять мост без игры (и в CI).
+sdk_dll() {
+  local v="$1" f
+  [[ -f "$SDKS/$v/source" ]] || die "SDK $v нет в каталоге: $(cmd_sdks | tr '\n' ' ')"
+  f="$W/steamworks/$v/steam_api64.dll"
+  fetch "$(swnet_url steam_api64.dll "$(sdk_field "$v" STEAMWORKS_NET_COMMIT)")" "$(sdk_field "$v" WIN64_DLL_SHA256)" "$f" "$GH_RAW"
+  echo "$f"
+}
+
+# Аргумент — путь к DLL или версия SDK из каталога.
+source_dll() {
+  local arg="${1:?нужен steam_api64.dll или версия SDK}"
+  if [[ -f "$arg" ]]; then echo "$arg"; else sdk_dll "$arg"; fi
+}
+
+bridge_dir() { echo "$W/bridge/$(shasum -a 256 "$1" | cut -d' ' -f1)"; }
+
+cmd_sdks() { find "$SDKS" -name source -mindepth 2 -maxdepth 2 | sed -E 's#.*/sdk/([^/]+)/source#\1#' | sort -V; }
+
+cmd_build() {
+  local dll out sdk dylib mingw
+  dll="$(source_dll "${1:-}")"
+  out="${2:-$(bridge_dir "$dll")}"
+  sdk="$(python3 -I "$SOJU_ROOT/bridge/sdk_detect.py" "$dll" "$SDKS")" \
+    || die "SDK этой DLL нет в каталоге: нужен bridge/sdk/<версия>/ с steam_api.json и source"
+  say "SDK Steamworks: $sdk"
+  dylib="$W/steamworks/$sdk/libsteam_api.dylib"
+  fetch "$(swnet_url steam_api.bundle/Contents/MacOS/libsteam_api.dylib "$(sdk_field "$sdk" STEAMWORKS_NET_COMMIT)")" \
+    "$(sdk_field "$sdk" MAC_DYLIB_SHA256)" "$dylib" "$GH_RAW"
+  mingw="$(ensure_mingw)"
+  mkdir -p "$out"
+  # stdout команды — только путь к мосту: его читают carafe и cmd_test.
+  PE_CC="$mingw/bin/x86_64-w64-mingw32-clang" "$SOJU_ROOT/bridge/build.sh" "$dll" "$dylib" "$SDKS/$sdk/steam_api.json" "$out" >&2
+  echo "$sdk" > "$out/sdk"
+  xattr -dr com.apple.quarantine "$out" 2>/dev/null || true
+  say "мост готов: $out"
+  echo "$out"
+}
+
+# Хелпер живёт, пока подключённая игра не уйдёт (или 2 минуты, если она так и не подключилась).
+# SteamAppId говорит Steam, за какую игру он выступает. Ставит SOJU_BRIDGE_PORT/TOKEN и STEAMD_PID.
+start_steamd() {
+  local bridge="$1" appid="$2" fifo port
+  [[ -x "$bridge/soju-steamd" ]] || die "в $bridge нет собранного моста: soju-bridge build"
+  fifo="$(mktemp -u "${TMPDIR:-/tmp}/soju-steamd.XXXXXX")"
+  mkfifo "$fifo"
+  SOJU_BRIDGE_TOKEN="$(head -c 32 /dev/urandom | xxd -p -c 64)"
+  export SOJU_BRIDGE_TOKEN
+  SOJU_BRIDGE_LOG="${SOJU_BRIDGE_LOG:-$W/bridge-$appid.log}" SteamAppId="$appid" SteamGameId="$appid" \
+    "$bridge/soju-steamd" > "$fifo" &
+  STEAMD_PID=$!
+  read -r port < "$fifo"; rm -f "$fifo"
+  [[ "$port" =~ ^[0-9]+$ ]] || { kill "$STEAMD_PID" 2>/dev/null; die "soju-steamd не запустился"; }
+  export SOJU_BRIDGE_PORT="$port"
+  say "мост в Steam: порт $port"
+}
+
+cmd_exec() {
+  local bridge="${1:?нужен каталог моста}" appid="${2:?нужен APPID}"; shift 2
+  [[ $# -gt 0 ]] || die "нужна команда"
+  start_steamd "$bridge" "$appid"
+  local rc=0
+  "$@" || rc=$?
+  # Лаунчер wine может выйти раньше игры: хелпер не убиваем, он выйдет сам, когда игра отключится.
+  wait "$STEAMD_PID" 2>/dev/null || true
+  return "$rc"
+}
+
+# Тесты моста под DLL: steamtest (Mac) и steamtest.exe (Windows) с C++-частью по слотам DLL.
+# Ставит B (каталог моста) и T (каталог тестов).
+build_tests() {
+  local dll="$1" src="$SOJU_ROOT/bridge/test" mingw
+  B="$(bridge_dir "$dll")"
+  [[ -x "$B/soju-steamd" ]] || B="$(cmd_build "$dll" | tail -1)"
+  T="$B/test"
+  mingw="$(ensure_mingw)"
+  mkdir -p "$T"
+  # C++-часть: заголовок по слотам DLL; под Mac — Itanium ABI, под Windows — ABI MSVC, как у игр.
+  python3 -I "$src/gen_header.py" "$SDKS/$(cat "$B/sdk")/steam_api.json" "$dll" "$T/steam_iface.hpp"
+  clang++ -std=c++17 -O1 -fno-exceptions -fno-rtti -I"$T" -c -o "$T/cpptest.o" "$src/cpptest.cpp"
+  clang -O1 -Wall -I"$T" -c -o "$T/steamtest.o" "$src/steamtest.c"
+  clang++ -o "$T/steamtest" "$T/steamtest.o" "$T/cpptest.o"
+  clang -target x86_64-pc-windows-msvc -std=c++17 -O1 -fno-exceptions -fno-rtti -fno-autolink -fno-stack-protector \
+    -x c++ -I"$T" -c -o "$T/cpptest.obj" "$src/cpptest.cpp"
+  "$mingw/bin/x86_64-w64-mingw32-clang" -O1 -Wall -I"$T" -o "$T/steamtest.exe" "$src/steamtest.c" "$T/cpptest.obj"
+  cp "$B/steam_api64.dll" "$T/steam_api64.dll"
+}
+
+cmd_test_build() {
+  build_tests "$(source_dll "${1:-}")"
+  say "тесты собраны: $T"
+}
+
+# bridge/test/steamtest.c на Spacewar (480): нативно с libsteam_api.dylib и под Wine через мост.
+cmd_test() {
+  local dll engine b t
+  dll="$(source_dll "${1:-}")"
+  engine="${SOJU_ENGINE:-$SOJU_ROOT/dist/soju-engine}"
+  [[ -x "$engine/bin/soju" ]] || die "нет движка $engine: scripts/build-engine.sh (или SOJU_ENGINE)"
+  pgrep -qx steam_osx || die "запусти Steam для Mac"
+  build_tests "$dll"
+  b="$B" t="$T"
+
+  export WINEPREFIX="${SOJU_TEST_PREFIX:-$W/test-prefix}" WINEDEBUG="${WINEDEBUG:--all}"
+  [[ -d "$WINEPREFIX" ]] || { say "создаю тестовый префикс"; "$engine/bin/soju" wineboot --init >/dev/null 2>&1; "$engine/bin/wineserver" -w; }
+
+  # В сравнение идут только строки теста: шум libsteam_api и Wine, CRLF Windows-сборки — мимо.
+  local clean='s/\r$//; /^(#|[A-Za-z0-9_.]+ = )/!d' mode
+  : > "$t/native.txt"
+  : > "$t/bridged.txt"
+  for mode in flat cpp; do
+    say "$mode: нативно (libsteam_api.dylib)"
+    (cd "$t" && SteamAppId=480 ./steamtest "$b/libsteam_api.dylib" "$mode" 2>&1) | sed -E "$clean" >> "$t/native.txt" || true
+    say "$mode: под Wine через мост"
+    (cd "$t" && SOJU_BRIDGE_LOG="$t/steamd-$mode.log" cmd_exec "$b" 480 "$engine/bin/soju" steamtest.exe steam_api64.dll "$mode" 2>&1) \
+      | sed -E "$clean" >> "$t/bridged.txt" || true
+  done
+
+  local fails; fails="$(cat "$t/native.txt" "$t/bridged.txt" | grep -c FAIL || true)"
+  if diff <(grep -v '^#' "$t/native.txt") <(grep -v '^#' "$t/bridged.txt") > "$t/diff.txt" && [[ "$fails" == 0 ]] \
+     && grep -q '^init = 0$' "$t/bridged.txt"; then
+    say "совпало, провалов нет ($(grep -vc '^#' "$t/bridged.txt") строк): $t"
+  else
+    cat "$t/diff.txt" >&2
+    die "мост расходится с нативным Steam или есть провалы: $t/{native,bridged,diff}.txt"
+  fi
+}
+
+case "${1:-}" in
+  build) shift; cmd_build "$@" ;;
+  exec) shift; cmd_exec "$@" ;;
+  test) shift; cmd_test "$@" ;;
+  test-build) shift; cmd_test_build "$@" ;;
+  sdk-dll) shift; sdk_dll "${1:?нужна версия SDK}" ;;
+  sdks) cmd_sdks ;;
+  *) sed -n '2,13p' "$0" | sed 's/^# \{0,1\}//' >&2; exit 1 ;;
+esac
