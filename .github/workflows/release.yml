@@ -111,6 +111,8 @@ jobs:
             echo
             echo "Архив без D3DMetal: он подключается из своей копии Game Porting Toolkit командой \`bin/soju-d3dmetal\`."
             echo "Манифест для carafe — \`engine.json\`."
+            echo
+            echo "Исходники: CrossOver $(jq -r .crossover engine.json) по ссылке из [sources.lock](https://github.com/$GH_REPO/blob/$SHA/sources.lock) и патчи soju на коммите $SHA. Лицензии — в \`share/doc/soju/\` внутри архива и в [NOTICE.md](https://github.com/$GH_REPO/blob/$SHA/NOTICE.md)."
           } > notes.md
           if gh release view "$TAG" >/dev/null 2>&1; then
             gh release upload "$TAG" ./*.tar.xz ./*.sha256 engine.json --clobber

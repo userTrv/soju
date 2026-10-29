@@ -117,6 +117,16 @@ for addon in mono:WINE_MONO gecko:WINE_GECKO_X86 gecko:WINE_GECKO_X64; do
   mkdir -p "$OUT/share/wine/$dir"
   cp "$W/dl/$(basename "$url")" "$OUT/share/wine/$dir/"
 done
+# Лицензии всего, что лежит в движке: Wine (LGPL), freetype (FTL или GPLv2), перечень частей.
+DOC="$OUT/share/doc/soju"
+mkdir -p "$DOC/wine" "$DOC/freetype"
+cp "$SRC/wine/"{LICENSE,COPYING.LIB,AUTHORS} "$DOC/wine/"
+FT_TAR="$W/dl/freetype-$FREETYPE_VERSION.tar.xz"
+fetch "$FREETYPE_URL" "$FREETYPE_SHA256" "$FT_TAR"
+tar xJf "$FT_TAR" -C "$DOC/freetype" --strip-components 2 \
+  "freetype-$FREETYPE_VERSION/docs/FTL.TXT" "freetype-$FREETYPE_VERSION/docs/GPLv2.TXT"
+tar xJf "$FT_TAR" -C "$DOC/freetype" --strip-components 1 "freetype-$FREETYPE_VERSION/LICENSE.TXT"
+cp "$ROOT/LICENSE" "$ROOT/NOTICE.md" "$DOC/"
 # bin/soju — wine с настройками движка: msync, D3DMetal, если подключён.
 cat > "$OUT/bin/soju" <<'EOF'
 #!/bin/bash
