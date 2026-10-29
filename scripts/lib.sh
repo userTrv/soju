@@ -11,20 +11,26 @@ say() { printf '\033[1m==> %s\033[0m\n' "$*" >&2; }
 die() { printf 'ошибка: %s\n' "$*" >&2; exit 1; }
 
 # fetch URL SHA256 FILE [ЗАГОЛОВОК] — скачать и сверить хеш; уже скачанный файл тоже сверяется.
+# URL может быть списком зеркал через пробел: пробуются по очереди (хеш один, так что зеркало
+# не может подсунуть другой файл).
 # Для api.github.com берётся GITHUB_TOKEN, если задан (в CI без него упираемся в лимит запросов):
 # заголовок идёт через файловый дескриптор, чтобы токен не попал в аргументы процесса.
 fetch() {
-  local url="$1" sha="$2" file="$3" hdr="${4:-}"
+  local urls="$1" sha="$2" file="$3" hdr="${4:-}" url ok=0
   if [[ ! -f "$file" ]]; then
     say "скачиваю $(basename "$file")"
     mkdir -p "$(dirname "$file")"
     local args=(-fsSL --retry 3 -A 'Mozilla/5.0' -o "$file.part")
     [[ -n "$hdr" ]] && args+=(-H "$hdr")
-    if [[ -n "${GITHUB_TOKEN:-}" && "$url" == https://api.github.com/* ]]; then
-      curl "${args[@]}" -H @<(printf 'Authorization: Bearer %s\n' "$GITHUB_TOKEN") "$url"
-    else
-      curl "${args[@]}" "$url"
-    fi
+    for url in $urls; do
+      if [[ -n "${GITHUB_TOKEN:-}" && "$url" == https://api.github.com/* ]]; then
+        curl "${args[@]}" -H @<(printf 'Authorization: Bearer %s\n' "$GITHUB_TOKEN") "$url" && { ok=1; break; }
+      else
+        curl "${args[@]}" "$url" && { ok=1; break; }
+      fi
+      say "не скачалось с $url"
+    done
+    [[ "$ok" == 1 ]] || { rm -f "$file.part"; die "не скачал $(basename "$file") ни с одного адреса"; }
     mv "$file.part" "$file"
   fi
   echo "$sha  $file" | shasum -a 256 -c --status || { rm -f "$file"; die "sha256 не совпал: $file"; }

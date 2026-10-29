@@ -66,7 +66,7 @@ fi
 # --- freetype (шрифты; без него игры остаются без текста) ---
 DEPS="$W/deps/x86_64"
 if [[ ! -f "$DEPS/lib/libfreetype.6.dylib" ]]; then
-  FT_TAR="$W/dl/$(basename "$FREETYPE_URL")"
+  FT_TAR="$W/dl/freetype-$FREETYPE_VERSION.tar.xz"
   fetch "$FREETYPE_URL" "$FREETYPE_SHA256" "$FT_TAR"
   say "собираю freetype $FREETYPE_VERSION"
   rm -rf "$W/obj/freetype" && mkdir -p "$W/obj/freetype"
