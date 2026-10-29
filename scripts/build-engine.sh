@@ -130,6 +130,8 @@ fi
 exec "$here/bin/wine" "$@"
 EOF
 chmod +x "$OUT/bin/soju"
+# bin/soju-d3dmetal — подключить D3DMetal из копии GPTK пользователя (ищет её сам).
+install -m 755 "$ROOT/scripts/install-d3dmetal.sh" "$OUT/bin/soju-d3dmetal"
 cat > "$OUT/SOJU" <<EOF
 crossover $CROSSOVER_VERSION
 wine $(sed 's/^Wine version //' "$SRC/wine/VERSION")
