@@ -4,10 +4,10 @@ name: engine
 
 on:
   pull_request:
-    paths: [scripts/build-engine.sh, scripts/smoke-engine.sh, scripts/lib.sh, sources.lock, patches/**, tests/**, .github/workflows/engine.yml]
+    paths: [scripts/build-engine.sh, scripts/smoke-engine.sh, scripts/package-engine.sh, scripts/install-d3dmetal.sh, scripts/lib.sh, sources.lock, patches/**, tests/**, .github/workflows/engine.yml]
   push:
     branches: [main]
-    paths: [scripts/build-engine.sh, scripts/smoke-engine.sh, scripts/lib.sh, sources.lock, patches/**, tests/**, .github/workflows/engine.yml]
+    paths: [scripts/build-engine.sh, scripts/smoke-engine.sh, scripts/package-engine.sh, scripts/install-d3dmetal.sh, scripts/lib.sh, sources.lock, patches/**, tests/**, .github/workflows/engine.yml]
   workflow_dispatch:
 
 permissions:
@@ -40,3 +40,5 @@ jobs:
         run: tail -n 80 .work/obj/*.log || true
       - name: Проверка движка
         run: scripts/smoke-engine.sh
+      - name: Архив движка и его проверка
+        run: scripts/package-engine.sh

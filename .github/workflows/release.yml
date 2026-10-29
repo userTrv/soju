@@ -1,0 +1,120 @@
+# Релиз движка: полная сборка, scripts/smoke-engine.sh, архив без D3DMetal (scripts/package-engine.sh —
+# он же распаковывает архив и проверяет его ещё раз) и публикация в GitHub Release.
+#
+# Тег engine-v<версия> — релиз с этой версией. Ручной запуск: с tag — то же самое (тег создаётся
+# на выбранном коммите), без tag — только сборка и архив в артефактах прогона, без публикации.
+name: release
+
+on:
+  push:
+    tags: ["engine-v*"]
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: "Тег релиза engine-v<версия>; пусто — собрать архив без публикации"
+        required: false
+        default: ""
+
+permissions:
+  contents: read
+
+concurrency:
+  group: release-${{ github.ref }}-${{ inputs.tag }}
+  cancel-in-progress: false
+
+jobs:
+  build:
+    runs-on: macos-15
+    timeout-minutes: 300
+    outputs:
+      tag: ${{ steps.ver.outputs.tag }}
+      version: ${{ steps.ver.outputs.version }}
+    env:
+      SOJU_WORK: ${{ github.workspace }}/.work
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Версия из тега
+        id: ver
+        env:
+          EVENT: ${{ github.event_name }}
+          REF_NAME: ${{ github.ref_name }}
+          INPUT_TAG: ${{ inputs.tag }}
+        run: |
+          if [ "$EVENT" = push ]; then tag="$REF_NAME"; else tag="$INPUT_TAG"; fi
+          version=""
+          if [ -n "$tag" ]; then
+            printf '%s' "$tag" | grep -qE '^engine-v[0-9A-Za-z][0-9A-Za-z._-]*$' \
+              || { echo "тег «$tag» не вида engine-v<версия>"; exit 1; }
+            version="${tag#engine-v}"
+          fi
+          echo "tag=$tag" >> "$GITHUB_OUTPUT"
+          echo "version=$version" >> "$GITHUB_OUTPUT"
+      - uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: |
+            .work/dl
+            .work/tools
+          key: engine-dl-${{ hashFiles('sources.lock') }}
+      - name: Rosetta и bison
+        run: |
+          /usr/bin/arch -x86_64 /usr/bin/true 2>/dev/null || softwareupdate --install-rosetta --agree-to-license
+          brew install bison
+      - name: Сборка движка
+        run: scripts/build-engine.sh
+      - name: Логи сборки
+        if: failure()
+        run: tail -n 80 .work/obj/*.log || true
+      - name: Проверка движка
+        run: scripts/smoke-engine.sh
+      - name: Архив (без D3DMetal, strip, проверка распакованного)
+        env:
+          VERSION: ${{ steps.ver.outputs.version }}
+        run: scripts/package-engine.sh dist/soju-engine dist/release ${VERSION:+"$VERSION"}
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: soju-engine
+          path: dist/release/
+          if-no-files-found: error
+          retention-days: 14
+          compression-level: 0
+
+  publish:
+    needs: build
+    if: needs.build.outputs.tag != ''
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    permissions:
+      contents: write
+      actions: read
+    steps:
+      - name: Публикация в GitHub Release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+          RUN_ID: ${{ github.run_id }}
+          TAG: ${{ needs.build.outputs.tag }}
+          VERSION: ${{ needs.build.outputs.version }}
+          SHA: ${{ github.sha }}
+        run: |
+          set -euo pipefail
+          mkdir release
+          gh run download "$RUN_ID" -n soju-engine -D release
+          cd release
+          ls -l
+          shasum -a 256 -c ./*.sha256
+          jq -e --arg v "$VERSION" '.version == $v' engine.json >/dev/null \
+            || { echo "версия в engine.json не $VERSION"; exit 1; }
+          {
+            echo "Движок soju $VERSION: $(jq -r '"CrossOver \(.crossover), Wine \(.wine), патчи \(.patches)"' engine.json)."
+            echo
+            echo "Архив без D3DMetal: он подключается из своей копии Game Porting Toolkit командой \`bin/soju-d3dmetal\`."
+            echo "Манифест для carafe — \`engine.json\`."
+          } > notes.md
+          if gh release view "$TAG" >/dev/null 2>&1; then
+            gh release upload "$TAG" ./*.tar.xz ./*.sha256 engine.json --clobber
+          else
+            gh release create "$TAG" ./*.tar.xz ./*.sha256 engine.json \
+              --title "soju engine $VERSION" --notes-file notes.md --target "$SHA" --latest
+          fi

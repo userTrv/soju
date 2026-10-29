@@ -35,8 +35,19 @@ scripts/build-engine.sh
 D3DMetal — закрытая библиотека Apple, распространять её нельзя, поэтому в движок она не входит. Её берут из своей копии Game Porting Toolkit:
 
 ```bash
-scripts/install-d3dmetal.sh "<GPTK>/Contents/Resources/wine"
+scripts/install-d3dmetal.sh                 # найти GPTK самому
+scripts/install-d3dmetal.sh "<GPTK>"        # или указать: .app, его Contents/Resources/wine, корень образа
+<движок>/bin/soju-d3dmetal                  # то же из готового движка — так делает carafe
 ```
+
+Без аргумента скрипт ищет D3DMetal по порядку и печатает, где нашёл:
+
+1. движок GPTK, скачанный carafe, — `~/Library/Application Support/carafe/engines/*/Game Porting Toolkit.app`;
+2. `/Applications/Game Porting Toolkit*.app` (и `~/Applications`);
+3. смонтированный образ GPTK от Apple — `/Volumes/Game Porting Toolkit*` или `/Volumes/Evaluation environment for Windows games*`, D3DMetal там в `redist/lib/external`, DLL — в `redist/lib/wine`;
+4. CrossOver — `CrossOver.app/Contents/SharedSupport/CrossOver/lib64/apple_gptk`.
+
+Не нашёл — подскажет, как получить GPTK: образ скачивается с [developer.apple.com/games/game-porting-toolkit](https://developer.apple.com/games/game-porting-toolkit/) под своим Apple ID.
 
 После этого `bin/soju` включает D3DMetal сам (`SOJU_D3DMETAL=0` — без него). Пересборка движка его стирает: скрипт нужно запустить снова.
 
@@ -92,7 +103,64 @@ Spacewar после теста остаётся в истории игр, а в 
 
 Открытый вопрос: под мостом примерно в 3 прогонах из 15 сервер не показал переключение ачивки даже через 7 секунд, хотя `StoreStats` ответил успехом. Нативно такого не было ни разу из 17. Причина не найдена, поэтому тест печатает EResult и номер попытки.
 
+## Релизы
+
+Готовый движок раздаётся архивом в [GitHub Releases](https://github.com/userTrv/soju/releases): carafe скачивает его вместо GPTK и подключает D3DMetal из копии пользователя.
+
+```bash
+scripts/package-engine.sh [движок] [каталог] [версия]   # по умолчанию dist/soju-engine → dist/release
+```
+
+Скрипт собирает `soju-engine-<версия>.tar.xz`, `.sha256` к нему и `engine.json`. Версия по умолчанию — `<crossover>-<отпечаток патчей>` из `SOJU`, например `26.3.0-f85893f398a6`. Исходный движок не меняется, всё делается на копии:
+
+- D3DMetal вычищается, даже если был подключён: `lib/external`, ссылки `x86_64-unix/*.so` → `libd3dshared.dylib`, PE-DLL D3DMetal (вместо `d3d1x`/`dxgi` Apple возвращаются DLL Wine из объектников той же сборки), строка `d3dmetal` в `SOJU`. Затем проверка: в файлах не должно быть путей сборки Apple, `d3d1x`/`dxgi` должны совпадать с DLL Wine из объектников. Что-то осталось — ошибка, архива нет. Архив выходит таким, будто `install-d3dmetal.sh` не запускали: раздавать D3DMetal нам нельзя.
+- В `bin/soju-d3dmetal` кладётся `install-d3dmetal.sh`, в `SOJU` — строка `version`.
+- С Mach-O снимается отладочная информация (`strip -S`), с PE — `llvm-strip --strip-debug` из llvm-mingw. Движок худеет с 1171 до 595 МБ, архив — с 321 до 227 МБ (xz -9). Метка «Wine builtin DLL» у DLL сохраняется, скрипт это проверяет.
+- Архив распаковывается во временный каталог, и на нём идёт `scripts/smoke-engine.sh`.
+
+В архиве один каталог `soju-engine-<версия>/` с `bin/`, `lib/`, `share/` и `SOJU`; владелец файлов — root, без расширенных атрибутов. Под Rosetta движок работает без подписи.
+
+### Выпуск
+
+Тег `engine-v<версия>` запускает `.github/workflows/release.yml`: полная сборка, `smoke-engine.sh`, `package-engine.sh` с версией из тега и публикация трёх файлов в релиз этого тега. Ручной запуск workflow с `tag` делает то же, без `tag` — только собирает архив в артефакты прогона. Права на запись в репозиторий есть только у шага публикации.
+
+```bash
+git tag engine-v26.3.0-1 && git push origin engine-v26.3.0-1
+```
+
+### engine.json
+
+Манифест для carafe, лежит в релизе рядом с архивом. Последний — `https://github.com/userTrv/soju/releases/latest/download/engine.json`, архив — по имени из `archive` в том же релизе.
+
+```json
+{
+  "format": 1,
+  "name": "soju-engine",
+  "version": "26.3.0-1",
+  "crossover": "26.3.0",
+  "wine": "11.0",
+  "patches": "f85893f398a6",
+  "built": "2026-10-29T03:36Z",
+  "archive": "soju-engine-26.3.0-1.tar.xz",
+  "root": "soju-engine-26.3.0-1",
+  "sha256": "…",
+  "size": 237581408,
+  "unpacked_size": 623468544,
+  "arch": "x86_64",
+  "rosetta": true,
+  "macos_min": "11.0",
+  "d3dmetal": { "bundled": false, "required": false, "install": "bin/soju-d3dmetal" }
+}
+```
+
+- `format` — версия формата манифеста; несовместимые изменения — новый номер.
+- `version` — версия движка; `crossover`, `wine`, `patches`, `built` — из `SOJU`.
+- `archive`, `sha256`, `size` — имя архива, его sha256 и размер в байтах; `root` — каталог движка внутри архива; `unpacked_size` — сколько займёт распакованный.
+- `arch`, `rosetta` — движок x86_64, на Apple Silicon нужна Rosetta 2. `macos_min` — минимальная macOS движка (из `LC_BUILD_VERSION` `bin/wine`); D3DMetal требует ту macOS, что указана для его версии GPTK.
+- `d3dmetal.bundled` — всегда `false`: D3DMetal в архиве нет. `required: false` — движок запускается и без него, но DirectX 11/12-играм он нужен. `install` — команда внутри движка, которая подключает D3DMetal (без аргументов ищет GPTK сама, путь можно передать первым аргументом).
+
 ## CI
 
 - `bridge.yml` — мост под каждый SDK каталога: проверки раскладок и vtable, сборка заглушки, хелпера и тестов.
-- `engine.yml` — полная сборка движка и `scripts/smoke-engine.sh`: префикс без окон, Windows 10, 64 и 32 бита.
+- `engine.yml` — полная сборка движка и `scripts/smoke-engine.sh`: префикс без окон, Windows 10, 64 и 32 бита; затем `scripts/package-engine.sh` — архив и его проверка.
+- `release.yml` — по тегу `engine-v*`: то же и публикация архива в GitHub Release.
