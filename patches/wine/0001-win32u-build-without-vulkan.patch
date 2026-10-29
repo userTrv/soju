@@ -1,0 +1,19 @@
+win32u: сборка без Vulkan (--without-vulkan)
+
+CW HACK 25909 в CrossOver использует SONAME_LIBVULKAN без проверки, а без
+Vulkan configure его не определяет. Без библиотеки Vulkan просто не грузим.
+
+--- a/dlls/win32u/vulkan.c
++++ b/dlls/win32u/vulkan.c
+@@ -3006,7 +3006,11 @@
+     if (!(libvulkan = getenv( "CX_LIBVULKAN" )) ||
+         !(graphics_backend = getenv( "CX_ACTIVE_GRAPHICS_BACKEND" )) ||
+         strcmp( graphics_backend, "wined3d" ))
++#ifdef SONAME_LIBVULKAN
+         libvulkan = SONAME_LIBVULKAN;
++#else
++        return;  /* собрано без Vulkan, а CX_LIBVULKAN не задан */
++#endif
+     else
+         ERR( "Using %s\n", libvulkan );
+ 

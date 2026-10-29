@@ -1,0 +1,60 @@
+# Мост Steamworks под каждый SDK каталога: раскладки структур (pack 8/4) и слоты vtable против
+# настоящих компиляторов, сборка заглушки и хелпера, тесты C и C++ под Mac и Windows.
+# Steam не нужен: проверка идёт на эталонных DLL из Steamworks.NET.
+name: bridge
+
+on:
+  pull_request:
+    paths: [bridge/**, bin/soju-bridge, scripts/lib.sh, sources.lock, .github/workflows/bridge.yml]
+  push:
+    branches: [main]
+    paths: [bridge/**, bin/soju-bridge, scripts/lib.sh, sources.lock, .github/workflows/bridge.yml]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  sdk:
+    runs-on: macos-15
+    timeout-minutes: 30
+    strategy:
+      fail-fast: false
+      matrix:
+        sdk: ["1.57", "1.60", "1.61", "1.62", "1.63", "1.64"]
+    env:
+      SOJU_WORK: ${{ github.workspace }}/.work
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: |
+            .work/dl
+            .work/tools
+            .work/steamworks
+          key: bridge-${{ matrix.sdk }}-${{ hashFiles('sources.lock', 'bridge/sdk/*/source') }}
+      - name: Сборка моста и проверки раскладок и vtable
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+        run: bin/soju-bridge build "${{ matrix.sdk }}"
+      - name: Сборка тестов (C и C++, Mac и Windows)
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+        run: bin/soju-bridge test-build "${{ matrix.sdk }}"
+
+  catalog:
+    # Каждый каталог SDK должен быть в матрице выше.
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Матрица совпадает с bridge/sdk
+        run: |
+          want="$(ls bridge/sdk | sort -V | tr '\n' ' ')"
+          have="$(sed -n 's/^ *sdk: \[\(.*\)\]/\1/p' .github/workflows/bridge.yml | tr -d '"' | tr ',' '\n' | tr -d ' ' | sort -V | tr '\n' ' ')"
+          echo "каталог: $want"; echo "матрица: $have"
+          [ "$want" = "$have" ]
