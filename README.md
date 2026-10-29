@@ -164,3 +164,7 @@ git tag engine-v26.3.0-1 && git push origin engine-v26.3.0-1
 - `bridge.yml` — мост под каждый SDK каталога: проверки раскладок и vtable, сборка заглушки, хелпера и тестов.
 - `engine.yml` — полная сборка движка и `scripts/smoke-engine.sh`: префикс без окон, Windows 10, 64 и 32 бита; затем `scripts/package-engine.sh` — архив и его проверка.
 - `release.yml` — по тегу `engine-v*`: то же и публикация архива в GitHub Release.
+
+## Лицензия
+
+GNU LGPL 2.1 или любая более поздняя версия, как у Wine — см. [LICENSE](LICENSE). Состав архива движка, лицензии сторонних частей и где взять их исходники — в [NOTICE.md](NOTICE.md); в самом архиве они лежат в `share/doc/soju/`.
