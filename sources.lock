@@ -1,0 +1,26 @@
+# Источники движка: URL и sha256. Скрипты читают файл через `source`.
+# Новая версия — новая строка здесь, после проверки, что релизу не меньше 7 дней.
+
+# Wine из открытых исходников CrossOver (LGPL): Wine 11.0 + поддержка D3DMetal в winemac.drv + msync.
+CROSSOVER_VERSION=26.3.0
+CROSSOVER_URL=https://media.codeweavers.com/pub/crossover/source/crossover-sources-26.3.0.tar.gz
+CROSSOVER_SHA256=ac99c8ca4b3848f3e81784135f023df266b61c2345726ea55a50b3e030dd6872
+
+# Кросс-компилятор PE (i686/x86_64-w64-mingw32-clang) для Windows-части Wine.
+LLVM_MINGW_VERSION=20261020
+LLVM_MINGW_URL=https://github.com/mstorsjo/llvm-mingw/releases/download/20261020/llvm-mingw-20261020-ucrt-macos-universal.tar.xz
+LLVM_MINGW_SHA256=e9c13e4ede38e715003ffc674d4d00a1088df8235439d1f0c16188ff0704c17e
+
+# freetype той же версии, что в CrossOver, но релизным архивом: в нём есть готовый configure.
+FREETYPE_VERSION=2.13.3
+FREETYPE_URL=https://downloads.sourceforge.net/project/freetype/freetype2/2.13.3/freetype-2.13.3.tar.xz
+FREETYPE_SHA256=0550350666d427c74daeb85d5ac7bb353acba5f76956395995311a9c6f063289
+
+# Wine Mono (.NET) и Wine Gecko (mshtml) — версии и sha256 из dlls/appwiz.cpl/addons.c этого Wine.
+# Лежат в share/wine/{mono,gecko} движка: Wine ставит их в префикс сам, без окна «Установить?».
+WINE_MONO_URL=https://dl.winehq.org/wine/wine-mono/10.4.1/wine-mono-10.4.1-x86.msi
+WINE_MONO_SHA256=071f4b2887e1c97a11d791ff3d65be9429eed6dec4c2708888bfd546ba358e23
+WINE_GECKO_X86_URL=https://dl.winehq.org/wine/wine-gecko/2.47.4/wine-gecko-2.47.4-x86.msi
+WINE_GECKO_X86_SHA256=26cecc47706b091908f7f814bddb074c61beb8063318e9efc5a7f789857793d6
+WINE_GECKO_X64_URL=https://dl.winehq.org/wine/wine-gecko/2.47.4/wine-gecko-2.47.4-x86_64.msi
+WINE_GECKO_X64_SHA256=e590b7d988a32d6aa4cf1d8aa3aa3d33766fdd4cf4c89c2dcc2095ecb28d066f
