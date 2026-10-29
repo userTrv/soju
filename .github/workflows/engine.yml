@@ -1,0 +1,42 @@
+# Полная сборка движка из исходников CrossOver и быстрая проверка: префикс без окон, Windows 10,
+# 64 и 32 бита (wow64). Без D3DMetal: он не распространяется и в CI его нет.
+name: engine
+
+on:
+  pull_request:
+    paths: [scripts/build-engine.sh, scripts/smoke-engine.sh, scripts/lib.sh, sources.lock, patches/**, tests/**, .github/workflows/engine.yml]
+  push:
+    branches: [main]
+    paths: [scripts/build-engine.sh, scripts/smoke-engine.sh, scripts/lib.sh, sources.lock, patches/**, tests/**, .github/workflows/engine.yml]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    runs-on: macos-15
+    timeout-minutes: 300
+    env:
+      SOJU_WORK: ${{ github.workspace }}/.work
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: |
+            .work/dl
+            .work/tools
+          key: engine-dl-${{ hashFiles('sources.lock') }}
+      - name: Rosetta и bison
+        run: |
+          /usr/bin/arch -x86_64 /usr/bin/true 2>/dev/null || softwareupdate --install-rosetta --agree-to-license
+          brew install bison
+      - name: Сборка движка
+        run: scripts/build-engine.sh
+      - name: Логи сборки
+        if: failure()
+        run: tail -n 80 .work/obj/*.log || true
+      - name: Проверка движка
+        run: scripts/smoke-engine.sh
