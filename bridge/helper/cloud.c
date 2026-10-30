@@ -10,6 +10,9 @@
  * --prefer pull и push ничего не переносят, печатают «  ! файл (конфликт: …)» и выходят с кодом 3.
  * --prefer local|cloud решает все конфликты в пользу одной стороны, вторая уходит в --backup.
  * status ничего не меняет, ни облако, ни диск, ни --state.
+ *
+ * soju-steamd cloud delete NAME... — удалить файлы из облака по именам, как их видит облако
+ * (`%WinAppDataRoaming%sct/a.json` или `sct/a.json`). Диск и --state не трогает.
  * Коды выхода: 0 — готово, 1 — ошибка, 3 — конфликт. */
 #define _DARWIN_C_SOURCE
 #include <CommonCrypto/CommonDigest.h>
@@ -880,9 +883,42 @@ static void lock_state(void) {
   /* fd открыт до выхода: блокировку снимает сама система. */
 }
 
+/* Удаление по именам: Cloud.ClientDeleteFile, явное (is_explicit_delete) — как удаление из клиента. */
+static int delete_files(int n, char **names) {
+  int failed = 0;
+  for (int i = 0; i < n; i++) {
+    bw req = {0};
+    pb_u(&req, 1, g_app);
+    pb_s(&req, 2, names[i]);
+    pb_u(&req, 3, 1);
+    uint8_t *resp; uint32_t rn;
+    int32_t r = call("Cloud.ClientDeleteFile#1", &req, &resp, &rn);
+    free(resp);
+    if (r == 1) say("  - %s\n", names[i]);
+    else { warn("soju cloud: не удалил %s: EResult %d\n", names[i], r); failed++; }
+  }
+  return failed;
+}
+
 int cloud_main(int argc, char **argv) {
-  if (argc < 3) die("cloud status|pull|push --state FILE --backup DIR --root N=DIR --rule R:P:PAT:REC [--prefer local|cloud] [--log FILE]");
+  if (argc < 3) die("cloud status|pull|push --state FILE --backup DIR --root N=DIR --rule R:P:PAT:REC [--prefer local|cloud] [--log FILE]\n"
+                    "cloud delete NAME...");
   const char *mode = argv[2];
+  if (!strcmp(mode, "delete")) {
+    const char *app = getenv("SteamAppId");
+    if (!app || argc < 4) die("cloud delete NAME... (нужен SteamAppId)");
+    g_app = (uint32_t)strtoul(app, NULL, 10);
+    quiet_steam();
+    char err[1024] = {0};
+    if (steam_init(NULL, err) != 0) { warn("soju cloud: Steam недоступен: %s\n", err); return 1; }
+    void *client = SteamInternal_CreateInterface("SteamClient021");
+    g_um = client ? SteamAPI_ISteamClient_GetISteamGenericInterface(client, SteamAPI_GetHSteamUser(), SteamAPI_GetHSteamPipe(),
+                                                                    "STEAMUNIFIEDMESSAGES_INTERFACE_VERSION001") : NULL;
+    if (!g_um) { SteamAPI_Shutdown(); die("нет ISteamUnifiedMessages в клиенте Steam"); }
+    int failed = delete_files(argc - 3, argv + 3);
+    SteamAPI_Shutdown();
+    return failed ? 1 : 0;
+  }
   const char *log_path = NULL, *prefer = NULL;
   g_t0 = now_s();
   for (int i = 3; i + 1 < argc; i += 2) {
