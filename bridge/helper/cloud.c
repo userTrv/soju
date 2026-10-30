@@ -17,6 +17,7 @@
 #include <ctype.h>
 #include <unistd.h>
 #include <fcntl.h>
+#include <stdarg.h>
 
 #include "steamd.h"
 
@@ -96,7 +97,67 @@ static const char *mask(const char *s) {
   return o;
 }
 
-static void die(const char *msg) { fprintf(ERR, "soju cloud: %s\n", msg); exit(1); }
+/* --- журнал: --log FILE, с отметками времени; Steam ID замаскированы, ссылок и заголовков нет --- */
+static FILE *g_log;
+static double g_t0;
+
+static double now_s(void) {
+  struct timeval tv;
+  gettimeofday(&tv, NULL);
+  return tv.tv_sec + tv.tv_usec / 1e6;
+}
+
+static void log_open(const char *path) {
+  struct stat st;
+  /* Больше 512 КБ — старое в .1, журнал с начала. */
+  if (!stat(path, &st) && st.st_size > 512 * 1024) {
+    char old[4200];
+    snprintf(old, sizeof old, "%s.1", path);
+    rename(path, old);
+  }
+  g_log = fopen(path, "a");
+  if (g_log) setvbuf(g_log, NULL, _IOLBF, 0);
+}
+
+/* Строка журнала; %s-аргументы с путями маскирует вызывающий. */
+static void logf_(const char *fmt, ...) {
+  if (!g_log) return;
+  char buf[2048], ts[16];
+  va_list ap;
+  va_start(ap, fmt);
+  vsnprintf(buf, sizeof buf, fmt, ap);
+  va_end(ap);
+  double t = now_s();
+  time_t sec = (time_t)t;
+  strftime(ts, sizeof ts, "%H:%M:%S", localtime(&sec));
+  fprintf(g_log, "%s.%03d +%6.2fs %s\n", ts, (int)((t - sec) * 1000), t - g_t0, buf);
+}
+
+/* Строка отчёта в stdout и в журнал. */
+static void say(const char *fmt, ...) {
+  char buf[2048];
+  va_list ap;
+  va_start(ap, fmt);
+  vsnprintf(buf, sizeof buf, fmt, ap);
+  va_end(ap);
+  fputs(buf, OUT);
+  buf[strcspn(buf, "\n")] = 0;
+  logf_("%s", buf);
+}
+
+/* Ошибка или предупреждение в stderr и в журнал. */
+static void warn(const char *fmt, ...) {
+  char buf[2048];
+  va_list ap;
+  va_start(ap, fmt);
+  vsnprintf(buf, sizeof buf, fmt, ap);
+  va_end(ap);
+  fputs(buf, ERR);
+  buf[strcspn(buf, "\n")] = 0;
+  logf_("%s", buf);
+}
+
+static void die(const char *msg) { warn("soju cloud: %s\n", msg); exit(1); }
 
 /* --- protobuf --- */
 static void pb_varint(bw *w, uint64_t v) { do { uint8_t b = v & 0x7f; v >>= 7; bw_u8(w, b | (v ? 0x80 : 0)); } while (v); }
@@ -139,6 +200,7 @@ static bool transient(int32_t r) { return r == 0 || r == 2 || r == 16 || r == 20
 
 static int32_t call_once(const char *method, const bw *req, uint8_t **out, uint32_t *outlen) {
   void **vt = *(void ***)g_um;
+  double t = now_s();
   uint64_t h = ((send_fn)vt[0])(g_um, method, req->p, req->n, 0);
   uint32_t size = 0; int32_t res = 0;
   for (int i = 0; i < 300; i++) {
@@ -149,6 +211,7 @@ static int32_t call_once(const char *method, const bw *req, uint8_t **out, uint3
   *out = malloc(size ? size : 1);
   *outlen = size;
   if (res == 1 && size && !((data_fn)vt[2])(g_um, h, *out, size, true)) res = 0;
+  logf_("%s → EResult %d, %u Б, %.2f с", method, res, size, now_s() - t);
   return res;
 }
 
@@ -156,7 +219,7 @@ static int32_t call_once(const char *method, const bw *req, uint8_t **out, uint3
 static int32_t call(const char *method, bw *req, uint8_t **out, uint32_t *outlen) {
   int32_t res = call_once(method, req, out, outlen);
   for (unsigned wait = 5; res != 1 && transient(res) && wait <= 45; wait *= 3) {
-    fprintf(ERR, "soju cloud: %s EResult %d, повторяю через %u с\n", method, res, wait);
+    warn("soju cloud: %s EResult %d, повторяю через %u с\n", method, res, wait);
     free(*out);
     sleep(wait);
     res = call_once(method, req, out, outlen);
@@ -200,7 +263,12 @@ static long http(const char *method, const char *host, const char *path, bool ht
     curl_easy_setopt(c, CURLOPT_POSTFIELDSIZE_LARGE, (curl_off_t)blen);
   }
   long code = 0;
-  if (curl_easy_perform(c) == CURLE_OK) curl_easy_getinfo(c, CURLINFO_RESPONSE_CODE, &code);
+  double t = now_s();
+  CURLcode cc = curl_easy_perform(c);
+  if (cc == CURLE_OK) curl_easy_getinfo(c, CURLINFO_RESPONSE_CODE, &code);
+  /* Только метод и хост: путь и заголовки — подписанная ссылка. */
+  logf_("HTTP %s %s → %ld%s%s, %zu Б, %.2f с", method, host, code, cc ? ", " : "", cc ? curl_easy_strerror(cc) : "",
+        blen ? blen : (resp ? resp->n : 0), now_s() - t);
   curl_slist_free_all(hl);
   curl_easy_cleanup(c);
   return code;
@@ -259,7 +327,7 @@ static void backup(const char *name, const uint8_t *p, size_t n, const char *sid
   for (const char *c = name; *c && k + 1 < sizeof safe; c++) safe[k++] = (*c == '/' || *c == '%') ? '_' : *c;
   safe[k] = 0;
   snprintf(path, sizeof path, "%s/%s/%s.%s", g_backup, g_stamp, safe, side);
-  if (!write_file(path, p, n, 0)) fprintf(ERR, "soju cloud: не сохранил копию %s\n", mask(path));
+  if (!write_file(path, p, n, 0)) warn("soju cloud: не сохранил копию %s\n", mask(path));
 }
 
 /* Имя в облаке → путь на диске: "%WinAppDataLocalLow%Ved/..." → "<root>/Ved/...". */
@@ -356,7 +424,7 @@ static void load_cloud(void) {
   pb_u(&req, 1, g_app);
   uint8_t *resp; uint32_t n;
   int32_t r = call("Cloud.GetAppFileChangelist#1", &req, &resp, &n);
-  if (r != 1) { fprintf(ERR, "soju cloud: GetAppFileChangelist EResult %d\n", r); exit(1); }
+  if (r != 1) { warn("soju cloud: GetAppFileChangelist EResult %d\n", r); exit(1); }
   char *prefixes[MAXF]; int np = 0;
   struct { char *file; uint32_t prefix; uint8_t sha[SHA_LEN]; uint64_t ts; uint32_t size; uint32_t persist; } raw[MAXF];
   int nr = 0;
@@ -419,13 +487,13 @@ static bool download(const cfile *c, uint8_t **data, size_t *n) {
     }
   }
   free(resp);
-  if (!host || !path || encrypted) { fprintf(ERR, "soju cloud: %s — %s\n", mask(c->name), encrypted ? "зашифрован" : "нет ссылки"); return false; }
+  if (!host || !path || encrypted) { warn("soju cloud: %s — %s\n", mask(c->name), encrypted ? "зашифрован" : "нет ссылки"); return false; }
   mem m = {0};
   long code = http("GET", host, path, https, hdr, nh, NULL, 0, &m);
   uint8_t sha[SHA_LEN];
   sha1(m.p ? m.p : (const uint8_t *)"", m.n, sha);
   if (code != 200 || memcmp(sha, c->sha, SHA_LEN)) {
-    fprintf(ERR, "soju cloud: %s — HTTP %ld%s\n", mask(c->name), code, code == 200 ? ", sha1 не совпал" : "");
+    warn("soju cloud: %s — HTTP %ld%s\n", mask(c->name), code, code == 200 ? ", sha1 не совпал" : "");
     free(m.p);
     return false;
   }
@@ -451,12 +519,12 @@ static bool upload(const lfile *l) {
   if (g_batch) pb_u(&req, 13, g_batch);
   uint8_t *resp; uint32_t rn;
   int32_t r = call("Cloud.ClientBeginFileUpload#1", &req, &resp, &rn);
-  if (r != 1) { fprintf(ERR, "soju cloud: ClientBeginFileUpload %s EResult %d\n", mask(l->name), r); free(data); free(resp); return false; }
+  if (r != 1) { warn("soju cloud: ClientBeginFileUpload %s EResult %d\n", mask(l->name), r); free(data); free(resp); return false; }
   bool ok = true;
   const uint8_t *p = resp, *end = resp + rn;
   pbf f;
   while (ok && pb_next(&p, end, &f)) {
-    if (f.field == 1 && f.v) { fprintf(ERR, "soju cloud: Steam требует шифрование — не поддержано\n"); ok = false; }
+    if (f.field == 1 && f.v) { warn("soju cloud: Steam требует шифрование — не поддержано\n"); ok = false; }
     if (f.field != 2 || f.type != 2) continue;
     char *host = NULL, *path = NULL, *hdr[64]; int nh = 0;
     bool https = true;
@@ -490,7 +558,7 @@ static bool upload(const lfile *l) {
     long code = http(method == 3 ? "POST" : "PUT", host, path, https, hdr, nh,
                      explicit_body ? explicit_body : data + off, explicit_body ? explicit_len : len, &m);
     free(m.p);
-    if (code < 200 || code >= 300) { fprintf(ERR, "soju cloud: загрузка %s — HTTP %ld\n", mask(l->name), code); ok = false; }
+    if (code < 200 || code >= 300) { warn("soju cloud: загрузка %s — HTTP %ld\n", mask(l->name), code); ok = false; }
   }
   free(resp);
   free(data);
@@ -551,9 +619,12 @@ static const char *short_name(const char *name) {
 int cloud_main(int argc, char **argv) {
   if (argc < 3) die("cloud status|pull|push --state FILE --backup DIR --root N=DIR --rule R:P:PAT:REC");
   const char *mode = argv[2];
+  const char *log_path = NULL;
+  g_t0 = now_s();
   for (int i = 3; i + 1 < argc; i += 2) {
     if (!strcmp(argv[i], "--state")) g_state_path = argv[i + 1];
     else if (!strcmp(argv[i], "--backup")) g_backup = argv[i + 1];
+    else if (!strcmp(argv[i], "--log")) log_path = argv[i + 1];
     else if (!strcmp(argv[i], "--root") && g_nroots < 16) {
       char *eq = strchr(argv[i + 1], '=');
       if (!eq) die("--root NAME=DIR");
@@ -573,12 +644,18 @@ int cloud_main(int argc, char **argv) {
   const char *app = getenv("SteamAppId");
   if (!app || !g_state_path || !g_backup) die("нужны SteamAppId, --state, --backup");
   g_app = (uint32_t)strtoul(app, NULL, 10);
+  if (log_path) log_open(log_path);
+  logf_("--- cloud %s, app %u, pid %d", mode, g_app, (int)getpid());
   quiet_steam();
   time_t now = time(NULL);
   strftime(g_stamp, sizeof g_stamp, "%Y%m%d-%H%M%S", localtime(&now));
 
   char err[1024] = {0};
-  if (steam_init(NULL, err) != 0) { fprintf(ERR, "soju cloud: Steam недоступен: %s\n", err); return 1; }
+  if (steam_init(NULL, err) != 0) {
+    warn("soju cloud: Steam недоступен: %s\n", err);
+    return 1;
+  }
+  logf_("Steam готов");
   void *client = SteamInternal_CreateInterface("SteamClient021");
   g_um = client ? SteamAPI_ISteamClient_GetISteamGenericInterface(client, SteamAPI_GetHSteamUser(), SteamAPI_GetHSteamPipe(),
                                                                   "STEAMUNIFIEDMESSAGES_INTERFACE_VERSION001") : NULL;
@@ -589,11 +666,12 @@ int cloud_main(int argc, char **argv) {
   load_cloud();
   for (int i = 0; i < g_nrules; i++) {
     const char *rd = root_dir(g_rules[i].root);
-    if (!rd) { fprintf(ERR, "soju cloud: нет каталога для корня %s — пропускаю\n", g_rules[i].root); continue; }
+    if (!rd) { warn("soju cloud: нет каталога для корня %s — пропускаю\n", g_rules[i].root); continue; }
     char dir[4096];
     snprintf(dir, sizeof dir, "%s/%s", rd, g_rules[i].path);
     scan(&g_rules[i], dir, "");
   }
+  logf_("в облаке %d файлов, на диске %d, в состоянии %d", g_ncloud, g_nlocal, g_nstate);
 
   /* Все имена: из облака и с диска. */
   const char *names[MAXF * 2]; int nn = 0;
@@ -636,18 +714,18 @@ int cloud_main(int argc, char **argv) {
     const char *sn = short_name(names[i]);
     if (act == SYNCED) {
       state_set(names[i], l->sha);
-      if (!strcmp(mode, "status")) fprintf(OUT, "  = %s\n", mask(sn));
+      if (!strcmp(mode, "status")) say("  = %s\n", mask(sn));
       continue;
     }
     if (!strcmp(mode, "status")) {
-      fprintf(OUT, "  %s %s%s\n", act == PULL ? "↓" : "↑", mask(sn), conflict ? " (конфликт: новее — эта сторона)" : "");
+      say("  %s %s%s\n", act == PULL ? "↓" : "↑", mask(sn), conflict ? " (конфликт: новее — эта сторона)" : "");
       continue;
     }
     if (act == PULL && !strcmp(mode, "pull")) {
       uint8_t *data; size_t n;
       if (!download(c, &data, &n)) { failed++; continue; }
       char *path = l ? strdup(l->path) : local_path(names[i]);
-      if (!path) { fprintf(ERR, "soju cloud: нет каталога для %s\n", mask(names[i])); free(data); failed++; continue; }
+      if (!path) { warn("soju cloud: нет каталога для %s\n", mask(names[i])); free(data); failed++; continue; }
       if (l) {
         size_t on;
         uint8_t *old = slurp(l->path, &on);
@@ -656,9 +734,9 @@ int cloud_main(int argc, char **argv) {
       }
       if (write_file(path, data, n, (time_t)c->ts)) {
         state_set(names[i], c->sha);
-        fprintf(OUT, "  ↓ %s%s\n", mask(sn), conflict ? " (конфликт: облако новее, локальный — в backups)" : "");
+        say("  ↓ %s%s\n", mask(sn), conflict ? " (конфликт: облако новее, локальный — в backups)" : "");
       } else {
-        fprintf(ERR, "soju cloud: не записал %s: %s\n", mask(path), strerror(errno));
+        warn("soju cloud: не записал %s: %s\n", mask(path), strerror(errno));
         failed++;
       }
       free(data);
@@ -670,7 +748,7 @@ int cloud_main(int argc, char **argv) {
       }
       if (upload(l)) {
         state_set(names[i], l->sha);
-        fprintf(OUT, "  ↑ %s%s\n", mask(sn), conflict ? " (конфликт: локальный новее, облачный — в backups)" : "");
+        say("  ↑ %s%s\n", mask(sn), conflict ? " (конфликт: локальный новее, облачный — в backups)" : "");
       } else {
         failed++;
       }
@@ -689,6 +767,7 @@ int cloud_main(int argc, char **argv) {
   state_save();
   curl_global_cleanup();
   SteamAPI_Shutdown();
+  logf_("итог: %s, ошибок %d, %.2f с", mode, failed, now_s() - g_t0);
   fflush(OUT);
   return failed ? 1 : 0;
 }
